@@ -4,6 +4,7 @@ import { Header } from './components/Header';
 import { UploadZone } from './components/UploadZone';
 import { WatermarkControls } from './components/WatermarkControls';
 import { PreviewCanvas } from './components/PreviewCanvas';
+import { ImageAnnotationModal } from './components/ImageAnnotationModal';
 import { generateSampleImage } from './utils/sampleImage';
 import { generateSampleLogo, generatePresetShapeLogo, PresetShapeType } from './utils/sampleLogo';
 import { useTranslation } from './utils/i18n';
@@ -42,6 +43,7 @@ export default function App({ mode }: AppProps) {
   const [settings, setSettings] = useState<WatermarkSettings>(DEFAULT_SETTINGS);
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [isLoadingSample, setIsLoadingSample] = useState<boolean>(false);
+  const [isAnnotationModalOpen, setIsAnnotationModalOpen] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<{
     type: 'success' | 'info' | 'error';
     text: string;
@@ -273,6 +275,26 @@ export default function App({ mode }: AppProps) {
     mainFileInputRef.current?.click();
   };
 
+  // 10c. Apply annotated image from ImageAnnotationModal
+  const handleApplyAnnotatedImage = (dataUrl: string, width: number, height: number) => {
+    const img = new Image();
+    img.onload = () => {
+      setImageElement(img);
+      const name = imageInfo?.name || 'annotated_image.png';
+      setImageInfo({
+        dataUrl,
+        name,
+        width,
+        height,
+        sizeBytes: Math.round((dataUrl.length * 3) / 4),
+        mimeType: 'image/png',
+      });
+      saveActiveImageSession({ dataUrl, name });
+      showToast(t('toastAnnotationApplied'));
+    };
+    img.src = dataUrl;
+  };
+
   // 11. Custom position change
   const handleCustomPositionChange = (x: number, y: number) => {
     if (settings.watermarkType === 'both') {
@@ -455,6 +477,7 @@ export default function App({ mode }: AppProps) {
         onLanguageChange={handleLanguageChange}
         hasImage={Boolean(imageInfo)}
         onChangeImage={handleChangeImage}
+        onOpenAnnotate={() => setIsAnnotationModalOpen(true)}
         onReset={handleReset}
         onLoadSample={handleLoadSample}
         onSwitchMode={handleSwitchMode}
@@ -537,6 +560,17 @@ export default function App({ mode }: AppProps) {
           </div>
         )}
       </main>
+
+      {/* Photo Markup & Annotation Studio Modal */}
+      {isAnnotationModalOpen && imageInfo && imageElement && (
+        <ImageAnnotationModal
+          imageInfo={imageInfo}
+          imageElement={imageElement}
+          lang={lang}
+          onApply={handleApplyAnnotatedImage}
+          onClose={() => setIsAnnotationModalOpen(false)}
+        />
+      )}
     </div>
   );
 }

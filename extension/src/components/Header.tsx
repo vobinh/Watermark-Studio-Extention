@@ -10,6 +10,7 @@ import {
   Check,
   Languages,
   Trash2,
+  PenTool,
 } from 'lucide-react';
 import { ViewMode, Language } from '../types';
 import { getDefaultViewMode, setDefaultViewMode as saveDefaultViewMode } from '../utils/storage';
@@ -21,6 +22,7 @@ interface HeaderProps {
   onLanguageChange: (newLang: Language) => void;
   hasImage: boolean;
   onChangeImage?: () => void;
+  onOpenAnnotate?: () => void;
   onReset: () => void;
   onLoadSample: () => void;
   onSwitchMode: () => void;
@@ -32,6 +34,7 @@ export const Header: React.FC<HeaderProps> = ({
   onLanguageChange,
   hasImage,
   onChangeImage,
+  onOpenAnnotate,
   onReset,
   onLoadSample,
   onSwitchMode,
@@ -133,6 +136,16 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             ) : (
               <div className="flex items-center gap-1">
+                <button
+                  id="btn-header-annotate-image"
+                  type="button"
+                  onClick={onOpenAnnotate}
+                  className="px-2.5 py-1.5 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/80 rounded-lg transition-colors flex items-center gap-1.5 shadow-2xs"
+                  title={t('annotateImageBtn')}
+                >
+                  <PenTool className="w-3.5 h-3.5 text-indigo-600" />
+                  <span className="hidden sm:inline">{t('annotateImageBtn')}</span>
+                </button>
                 <button
                   id="btn-header-change-image"
                   type="button"
