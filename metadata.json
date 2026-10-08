@@ -1,0 +1,7 @@
+{
+  "name": "Image Watermark Tool",
+  "description": "Công cụ chèn watermark chữ vào ảnh tự động và tải xuống nhanh chóng",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
