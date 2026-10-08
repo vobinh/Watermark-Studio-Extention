@@ -7,6 +7,10 @@ import {
   getTextAnnotationDimensions,
   flattenAnnotations,
 } from '../utils/annotationEngine';
+import {
+  downloadCanvas,
+  copyCanvasToClipboard,
+} from '../utils/watermarkRenderer';
 import { Language, ImageInfo } from '../types';
 import { useTranslation } from '../utils/i18n';
 import {
@@ -33,6 +37,12 @@ import {
   Palette,
   Pencil,
   Scaling,
+  Download,
+  Copy,
+  ImageIcon,
+  Sparkles,
+  SquareDashed,
+  Frame,
 } from 'lucide-react';
 
 interface ActiveTextEditor {
@@ -44,6 +54,7 @@ interface ActiveTextEditor {
   text: string;
   fontSize: number;
   color: string;
+  hasBorder: boolean;
 }
 
 interface ImageAnnotationModalProps {
@@ -52,6 +63,8 @@ interface ImageAnnotationModalProps {
   lang: Language;
   onApply: (dataUrl: string, width: number, height: number) => void;
   onClose: () => void;
+  onChangeImageFile?: (file: File) => void;
+  showToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
 const COLOR_PALETTE = [
@@ -71,18 +84,30 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
   lang,
   onApply,
   onClose,
+  onChangeImageFile,
+  showToast,
 }) => {
   const { t } = useTranslation(lang);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const changeImageInputRef = useRef<HTMLInputElement>(null);
 
   // Tools & Properties
   const [activeTool, setActiveTool] = useState<AnnotationTool>('arrow');
   const [activeColor, setActiveColor] = useState<string>('#ef4444');
   const [activeStrokeWidth, setActiveStrokeWidth] = useState<number>(4);
-  const [fillShape, setFillShape] = useState<boolean>(false);
-  const [textInput, setTextInput] = useState<string>('Ghi chú');
+  const [fillOpacity, setFillOpacity] = useState<number>(25); // 0% to 100%
+  const [textHasBorder, setTextHasBorder] = useState<boolean>(true); // default true
+
+  // Export & Feedback states
+  const [copySuccess, setCopySuccess] = useState<boolean>(false);
+
+  const notifyUser = (msg: string, type: 'success' | 'error' | 'info' = 'success') => {
+    if (showToast) {
+      showToast(msg, type);
+    }
+  };
 
   // Interactive floating text note editor state
   const [activeTextEditor, setActiveTextEditor] = useState<ActiveTextEditor | null>(null);
@@ -360,6 +385,7 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
               height: activeTextEditor.height,
               fontSize: activeTextEditor.fontSize,
               color: activeTextEditor.color,
+              hasBorder: activeTextEditor.hasBorder,
             }
           : item
       );
@@ -378,6 +404,7 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
         color: activeTextEditor.color,
         strokeWidth: activeStrokeWidth,
         fontSize: activeTextEditor.fontSize,
+        hasBorder: activeTextEditor.hasBorder,
       };
       const next = [...annotations, newItem];
       setAnnotations(next);
@@ -392,6 +419,36 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
   const handleCancelTextEditor = useCallback(() => {
     setActiveTextEditor(null);
   }, []);
+
+  const handleSetFillOpacity = (val: number) => {
+    setFillOpacity(val);
+    if (selectedId) {
+      setAnnotations((prev) =>
+        prev.map((a) =>
+          a.id === selectedId && (a.tool === 'rect' || a.tool === 'circle')
+            ? { ...a, filled: val > 0, fillOpacity: val }
+            : a
+        )
+      );
+    }
+  };
+
+  const handleToggleTextBorder = () => {
+    const nextVal = !textHasBorder;
+    setTextHasBorder(nextVal);
+    if (activeTextEditor) {
+      setActiveTextEditor((prev) => (prev ? { ...prev, hasBorder: nextVal } : null));
+    }
+    if (selectedId) {
+      setAnnotations((prev) =>
+        prev.map((a) =>
+          a.id === selectedId && a.tool === 'text'
+            ? { ...a, hasBorder: nextVal }
+            : a
+        )
+      );
+    }
+  };
 
   const handleTextResizeMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -449,6 +506,12 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
       const hit = findItemAt(pt.x, pt.y);
       if (hit) {
         setSelectedId(hit.id);
+        if (hit.tool === 'text' && hit.hasBorder !== undefined) {
+          setTextHasBorder(hit.hasBorder);
+        }
+        if ((hit.tool === 'rect' || hit.tool === 'circle') && hit.fillOpacity !== undefined) {
+          setFillOpacity(hit.fillOpacity);
+        }
 
         // Check if clicking near the bottom-right corner of the item's bounding box
         const ctx = canvasRef.current?.getContext('2d');
@@ -506,6 +569,7 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
         text: '',
         fontSize: Math.max(18, activeStrokeWidth * 5),
         color: activeColor,
+        hasBorder: textHasBorder,
       });
       return;
     }
@@ -519,7 +583,8 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
       tool: activeTool,
       color: activeColor,
       strokeWidth: activeStrokeWidth,
-      filled: fillShape,
+      filled: fillOpacity > 0,
+      fillOpacity: (activeTool === 'rect' || activeTool === 'circle') ? fillOpacity : 0,
       x: pt.x,
       y: pt.y,
       endX: pt.x,
@@ -545,6 +610,7 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
         text: hit.text || '',
         fontSize: hit.fontSize || 22,
         color: hit.color || activeColor,
+        hasBorder: hit.hasBorder !== false,
       });
     }
   };
@@ -659,8 +725,71 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
     }
   };
 
-  // Apply Changes Handler
-  const handleApplyChanges = async () => {
+  // Save/Download annotated image directly
+  const handleSaveImage = async (format: 'png' | 'jpeg' = 'png') => {
+    setIsApplying(true);
+    try {
+      const result = await flattenAnnotations(imageElement, annotations, {
+        rotation,
+        flipH,
+        flipV,
+      });
+      const baseName = imageInfo.name ? imageInfo.name.replace(/\.[^.]+$/, '') : 'photo';
+      const filename = `${baseName}_markup.${format === 'jpeg' ? 'jpg' : 'png'}`;
+      await downloadCanvas(result.canvas, filename, format, 0.95);
+      notifyUser(t('toastDownloadAnnotatedSuccess'), 'success');
+    } catch (err: any) {
+      console.error('Lỗi khi tải ảnh:', err);
+    } finally {
+      setIsApplying(false);
+    }
+  };
+
+  // Copy annotated image directly to clipboard
+  const handleCopyImage = async () => {
+    setIsApplying(true);
+    try {
+      const result = await flattenAnnotations(imageElement, annotations, {
+        rotation,
+        flipH,
+        flipV,
+      });
+      const ok = await copyCanvasToClipboard(result.canvas);
+      if (ok) {
+        setCopySuccess(true);
+        setTimeout(() => setCopySuccess(false), 2000);
+        notifyUser(t('toastCopyAnnotatedSuccess'), 'success');
+      } else {
+        notifyUser('Trình duyệt không hỗ trợ sao chép ảnh vào clipboard', 'error');
+      }
+    } catch (err: any) {
+      console.error('Lỗi khi sao chép ảnh:', err);
+    } finally {
+      setIsApplying(false);
+    }
+  };
+
+  // Change image from file dialog
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (onChangeImageFile) {
+        onChangeImageFile(file);
+      }
+      setAnnotations([]);
+      setUndoStack([]);
+      setRedoStack([]);
+      setSelectedId(null);
+      setRotation(0);
+      setFlipH(false);
+      setFlipV(false);
+      setActiveTextEditor(null);
+      notifyUser(`${file.name}`, 'info');
+    }
+  };
+
+  // Apply to Watermark
+  const handleApplyToWatermark = async () => {
     setIsApplying(true);
     try {
       const result = await flattenAnnotations(imageElement, annotations, {
@@ -670,29 +799,58 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
       });
       onApply(result.dataUrl, result.width, result.height);
       onClose();
-    } catch (err) {
-      console.error('Lỗi khi áp dụng chỉnh sửa:', err);
+    } catch (err: any) {
+      console.error('Lỗi khi áp dụng:', err);
     } finally {
       setIsApplying(false);
     }
   };
 
+  const selectedItem = selectedId ? annotations.find((a) => a.id === selectedId) : null;
+  const isFillToolActive =
+    activeTool === 'rect' ||
+    activeTool === 'circle' ||
+    (selectedItem?.tool === 'rect' || selectedItem?.tool === 'circle');
+  const isTextToolActive =
+    activeTool === 'text' ||
+    selectedItem?.tool === 'text' ||
+    !!activeTextEditor;
+
   return (
     <div className="fixed inset-0 z-50 bg-slate-950 flex flex-col select-none overflow-hidden text-slate-100 font-sans">
+      <input
+        type="file"
+        ref={changeImageInputRef}
+        accept="image/*"
+        className="hidden"
+        onChange={handleFileInputChange}
+      />
+
       {/* 1. TOP HEADER BAR */}
-      <header className="h-13 bg-slate-900 border-b border-slate-800 px-3 sm:px-5 flex items-center justify-between gap-3 shrink-0">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-7 h-7 rounded-lg bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
+      <header className="h-14 bg-slate-900 border-b border-slate-800 px-3 sm:px-4 flex items-center justify-between gap-2 shrink-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center text-indigo-400 shrink-0">
             <PenTool className="w-3.5 h-3.5" />
           </div>
-          <div className="min-w-0">
-            <h2 className="text-xs sm:text-sm font-bold text-white truncate">
+          <div className="min-w-0 hidden md:block">
+            <h2 className="text-xs font-bold text-white truncate">
               {t('annotationStudioTitle')}
             </h2>
           </div>
+
+          {/* Change Image Button */}
+          <button
+            type="button"
+            onClick={() => changeImageInputRef.current?.click()}
+            className="px-2.5 py-1.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-all shadow-xs hover:border-slate-600"
+            title={t('changeImageBtn')}
+          >
+            <ImageIcon className="w-3.5 h-3.5 text-blue-400" />
+            <span className="hidden sm:inline">{t('changeImageBtn')}</span>
+          </button>
         </div>
 
-        {/* History & Zoom Quick Controls */}
+        {/* History, Selected item tools, Zoom controls */}
         <div className="flex items-center gap-1 sm:gap-1.5">
           <button
             type="button"
@@ -747,6 +905,7 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
                     text: target.text || '',
                     fontSize: target.fontSize || 22,
                     color: target.color || activeColor,
+                    hasBorder: target.hasBorder !== false,
                   });
                 }
               }}
@@ -754,7 +913,7 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
               title={t('editTextBtn')}
             >
               <Pencil className="w-3.5 h-3.5" />
-              <span>{t('editTextBtn')}</span>
+              <span className="hidden sm:inline">{t('editTextBtn')}</span>
             </button>
           )}
 
@@ -802,24 +961,57 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
           </div>
         </div>
 
-        {/* Action Buttons: Cancel & Apply */}
+        {/* Right Action Buttons: Copy, Save Image, Apply to Watermark, Close */}
         <div className="flex items-center gap-1.5 sm:gap-2">
+          {/* Copy button */}
+          <button
+            type="button"
+            onClick={handleCopyImage}
+            disabled={isApplying}
+            className="px-2.5 py-1.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-all shadow-xs"
+            title={t('copyAnnotatedBtn')}
+          >
+            {copySuccess ? (
+              <Check className="w-3.5 h-3.5 text-emerald-400" />
+            ) : (
+              <Copy className="w-3.5 h-3.5 text-slate-300" />
+            )}
+            <span className="hidden md:inline">
+              {copySuccess ? 'Đã sao chép!' : t('copyAnnotatedBtn')}
+            </span>
+          </button>
+
+          {/* Save Image button */}
+          <button
+            type="button"
+            onClick={() => handleSaveImage('png')}
+            disabled={isApplying}
+            className="px-3 py-1.5 rounded-xl border border-indigo-500/40 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs"
+            title={t('saveAnnotatedBtn')}
+          >
+            <Download className="w-3.5 h-3.5 text-indigo-400" />
+            <span>{t('saveAnnotatedBtn')}</span>
+          </button>
+
+          {/* Apply to Watermark button */}
+          <button
+            type="button"
+            onClick={handleApplyToWatermark}
+            disabled={isApplying}
+            className="px-3 sm:px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold shadow-md shadow-indigo-600/30 transition-all flex items-center gap-1.5"
+            title={t('applyToWatermarkBtn')}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">{t('applyToWatermarkBtn')}</span>
+          </button>
+
           <button
             type="button"
             onClick={onClose}
-            className="px-2.5 py-1.5 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold transition-colors flex items-center gap-1"
+            className="p-1.5 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors ml-1"
+            title={t('discardAnnotationBtn')}
           >
-            <X className="w-3.5 h-3.5" />
-            <span>{t('discardAnnotationBtn')}</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleApplyChanges}
-            disabled={isApplying}
-            className="px-3 sm:px-4 py-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold shadow-md shadow-indigo-600/30 transition-all flex items-center gap-1.5"
-          >
-            <Check className="w-3.5 h-3.5" />
-            <span>{isApplying ? 'Đang lưu...' : t('applyAnnotationBtn')}</span>
+            <X className="w-4 h-4" />
           </button>
         </div>
       </header>
@@ -974,21 +1166,89 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
             ))}
           </div>
 
-          {/* Fill shape checkbox (for rect/circle) */}
-          {(activeTool === 'rect' || activeTool === 'circle') && (
-            <label className="flex items-center gap-1.5 cursor-pointer text-slate-300 text-[11px] border-l border-slate-800 pl-2">
-              <input
-                type="checkbox"
-                checked={fillShape}
-                onChange={(e) => setFillShape(e.target.checked)}
-                className="rounded border-slate-700 text-blue-600 focus:ring-0 w-3.5 h-3.5"
-              />
-              <span>{t('fillShapeLabel')}</span>
-            </label>
+          {/* Fill Opacity selector for rect/circle */}
+          {isFillToolActive && (
+            <div className="flex items-center gap-1.5 border-l border-slate-800 pl-2">
+              <span className="text-[11px] text-slate-400 font-medium hidden sm:inline">
+                {t('fillOpacityLabel')}:
+              </span>
+              <div className="flex items-center gap-1 bg-slate-950/60 p-0.5 rounded-lg border border-slate-800/80">
+                {[
+                  { val: 0, label: t('fillNone') },
+                  { val: 25, label: '25%' },
+                  { val: 50, label: '50%' },
+                  { val: 75, label: '75%' },
+                  { val: 100, label: '100%' },
+                ].map((opt) => {
+                  const currentVal =
+                    selectedItem && (selectedItem.tool === 'rect' || selectedItem.tool === 'circle')
+                      ? selectedItem.fillOpacity ?? (selectedItem.filled ? 50 : 0)
+                      : fillOpacity;
+                  return (
+                    <button
+                      key={opt.val}
+                      type="button"
+                      onClick={() => handleSetFillOpacity(opt.val)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-all ${
+                        currentVal === opt.val
+                          ? 'bg-blue-600 text-white font-bold shadow-xs'
+                          : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Text Border toggle button */}
+          {isTextToolActive && (
+            <div className="flex items-center gap-1.5 border-l border-slate-800 pl-2">
+              <button
+                type="button"
+                onClick={handleToggleTextBorder}
+                className={`px-2 py-0.5 rounded-md text-[11px] font-semibold flex items-center gap-1.5 transition-all border ${
+                  (activeTextEditor
+                    ? activeTextEditor.hasBorder !== false
+                    : selectedItem && selectedItem.tool === 'text'
+                    ? selectedItem.hasBorder !== false
+                    : textHasBorder)
+                    ? 'bg-blue-600/25 text-blue-300 border-blue-500/40 hover:bg-blue-600/35'
+                    : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                }`}
+                title={
+                  (activeTextEditor
+                    ? activeTextEditor.hasBorder !== false
+                    : selectedItem && selectedItem.tool === 'text'
+                    ? selectedItem.hasBorder !== false
+                    : textHasBorder)
+                    ? t('textBorderLabel')
+                    : t('textNoBorderLabel')
+                }
+              >
+                {(activeTextEditor
+                  ? activeTextEditor.hasBorder !== false
+                  : selectedItem && selectedItem.tool === 'text'
+                  ? selectedItem.hasBorder !== false
+                  : textHasBorder) ? (
+                  <>
+                    <Frame className="w-3.5 h-3.5 text-blue-400" />
+                    <span>{t('textBorderLabel')}</span>
+                  </>
+                ) : (
+                  <>
+                    <SquareDashed className="w-3.5 h-3.5 text-amber-400" />
+                    <span>{t('textNoBorderLabel')}</span>
+                  </>
+                )}
+              </button>
+            </div>
           )}
 
           {/* Text note active hint */}
-          {activeTool === 'text' && (
+          {activeTool === 'text' && !activeTextEditor && (
             <div className="flex items-center gap-1.5 border-l border-slate-800 pl-2 text-blue-400 font-semibold text-xs">
               <Type className="w-3.5 h-3.5" />
               <span>{t('clickToPlaceTextHint')}</span>
@@ -1039,15 +1299,25 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
                 left: `${(activeTextEditor.x / stageWidth) * 100}%`,
                 top: `${(activeTextEditor.y / stageHeight) * 100}%`,
                 width: `${(activeTextEditor.width / stageWidth) * 100}%`,
-                minWidth: '180px',
-                borderColor: activeTextEditor.color,
-                backgroundColor: 'rgba(15, 23, 42, 0.94)',
-                boxShadow: `0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 0 15px ${activeTextEditor.color}33`,
+                minWidth: '200px',
+                borderColor:
+                  activeTextEditor.hasBorder !== false
+                    ? activeTextEditor.color
+                    : 'rgba(148, 163, 184, 0.45)',
+                borderStyle: activeTextEditor.hasBorder !== false ? 'solid' : 'dashed',
+                backgroundColor:
+                  activeTextEditor.hasBorder !== false
+                    ? 'rgba(15, 23, 42, 0.94)'
+                    : 'rgba(15, 23, 42, 0.75)',
+                boxShadow:
+                  activeTextEditor.hasBorder !== false
+                    ? `0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 0 15px ${activeTextEditor.color}33`
+                    : '0 10px 20px -3px rgba(0, 0, 0, 0.4)',
               }}
               onClick={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.stopPropagation()}
             >
-              {/* Mini Header: Font Size Controls + Done/Cancel */}
+              {/* Mini Header: Font Size Controls + Border Toggle + Done/Cancel */}
               <div className="flex items-center justify-between gap-1 px-2.5 py-1.5 bg-slate-900/95 border-b border-slate-800 rounded-t-xl select-none">
                 <div className="flex items-center gap-1">
                   <span className="text-[10px] text-slate-400 font-semibold">
@@ -1083,6 +1353,37 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
                 </div>
 
                 <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTextEditor((prev) =>
+                        prev ? { ...prev, hasBorder: !prev.hasBorder } : null
+                      );
+                      setTextHasBorder((prev) => !prev);
+                    }}
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-semibold flex items-center gap-1 transition-colors border ${
+                      activeTextEditor.hasBorder !== false
+                        ? 'bg-blue-600/30 text-blue-300 border-blue-500/40'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}
+                    title={
+                      activeTextEditor.hasBorder !== false
+                        ? t('textBorderLabel')
+                        : t('textNoBorderLabel')
+                    }
+                  >
+                    {activeTextEditor.hasBorder !== false ? (
+                      <>
+                        <Frame className="w-3 h-3 text-blue-400" />
+                        <span className="hidden sm:inline">{t('textBorderLabel')}</span>
+                      </>
+                    ) : (
+                      <>
+                        <SquareDashed className="w-3 h-3 text-amber-400" />
+                        <span className="hidden sm:inline">{t('textNoBorderLabel')}</span>
+                      </>
+                    )}
+                  </button>
                   <button
                     type="button"
                     onClick={handleCancelTextEditor}

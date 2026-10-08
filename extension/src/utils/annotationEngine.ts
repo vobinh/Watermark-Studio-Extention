@@ -37,6 +37,8 @@ export interface AnnotationItem {
   fontSize?: number;
   stepNumber?: number;
   filled?: boolean;
+  fillOpacity?: number; // 0 to 100%
+  hasBorder?: boolean; // For text note: true (with pill/border) or false (text only)
 }
 
 /**
@@ -296,8 +298,9 @@ export function renderAnnotationItem(
       ctx.fillStyle = item.color;
 
       drawRoundedRect(ctx, item.x, item.y, w, h, 6);
-      if (item.filled) {
-        ctx.globalAlpha = 0.25;
+      const fillPercent = item.fillOpacity !== undefined ? item.fillOpacity : (item.filled ? 25 : 0);
+      if (fillPercent > 0) {
+        ctx.globalAlpha = Math.min(1, Math.max(0, fillPercent / 100));
         ctx.fill();
         ctx.globalAlpha = 1.0;
       }
@@ -318,9 +321,10 @@ export function renderAnnotationItem(
         ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
         ctx.lineWidth = item.strokeWidth;
         ctx.strokeStyle = item.color;
-        if (item.filled) {
+        const fillPercent = item.fillOpacity !== undefined ? item.fillOpacity : (item.filled ? 25 : 0);
+        if (fillPercent > 0) {
           ctx.fillStyle = item.color;
-          ctx.globalAlpha = 0.25;
+          ctx.globalAlpha = Math.min(1, Math.max(0, fillPercent / 100));
           ctx.fill();
           ctx.globalAlpha = 1.0;
         }
@@ -379,15 +383,24 @@ export function renderAnnotationItem(
       if (!item.text) break;
       const dims = getTextAnnotationDimensions(ctx, item);
 
-      // Draw rounded background badge/card for high contrast readability
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.90)';
-      drawRoundedRect(ctx, item.x, item.y, dims.width, dims.height, 8);
-      ctx.fill();
+      const hasBorder = item.hasBorder !== false;
+      if (hasBorder) {
+        // Draw rounded background badge/card for high contrast readability
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.90)';
+        drawRoundedRect(ctx, item.x, item.y, dims.width, dims.height, 8);
+        ctx.fill();
 
-      // Border outline around badge
-      ctx.strokeStyle = item.color;
-      ctx.lineWidth = Math.max(1.5, item.strokeWidth * 0.5);
-      ctx.stroke();
+        // Border outline around badge
+        ctx.strokeStyle = item.color;
+        ctx.lineWidth = Math.max(1.5, item.strokeWidth * 0.5);
+        ctx.stroke();
+      } else {
+        // Subtle drop shadow so borderless text is readable on any background
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
+        ctx.shadowBlur = 5;
+        ctx.shadowOffsetX = 1;
+        ctx.shadowOffsetY = 1;
+      }
 
       // Draw text lines
       ctx.fillStyle = item.color.toLowerCase() === '#0f172a' ? '#ffffff' : item.color;
@@ -400,6 +413,8 @@ export function renderAnnotationItem(
       dims.lines.forEach((line, idx) => {
         ctx.fillText(line, item.x + dims.padX, item.y + dims.padY + idx * dims.lineHeight);
       });
+
+      ctx.shadowColor = 'transparent';
       break;
     }
 
@@ -534,12 +549,14 @@ export function flattenAnnotations(
     flipV: boolean;
     crop?: { x: number; y: number; width: number; height: number } | null;
   }
-): Promise<{ dataUrl: string; width: number; height: number }> {
+): Promise<{ canvas: HTMLCanvasElement; dataUrl: string; width: number; height: number }> {
   return new Promise((resolve) => {
     // 1. Calculate transformed dimensions
+    const imgW = baseImg.naturalWidth || baseImg.width;
+    const imgH = baseImg.naturalHeight || baseImg.height;
     const isRotated90or270 = transforms.rotation === 90 || transforms.rotation === 270;
-    const stageWidth = isRotated90or270 ? baseImg.naturalHeight : baseImg.naturalWidth;
-    const stageHeight = isRotated90or270 ? baseImg.naturalWidth : baseImg.naturalHeight;
+    const stageWidth = isRotated90or270 ? imgH : imgW;
+    const stageHeight = isRotated90or270 ? imgW : imgH;
 
     // Stage canvas for rendering base image + annotations
     const stage = document.createElement('canvas');
@@ -556,10 +573,10 @@ export function flattenAnnotations(
     sCtx.scale(transforms.flipH ? -1 : 1, transforms.flipV ? -1 : 1);
     sCtx.drawImage(
       baseImg,
-      -baseImg.naturalWidth / 2,
-      -baseImg.naturalHeight / 2,
-      baseImg.naturalWidth,
-      baseImg.naturalHeight
+      -imgW / 2,
+      -imgH / 2,
+      imgW,
+      imgH
     );
     sCtx.restore();
 
@@ -569,6 +586,7 @@ export function flattenAnnotations(
     });
 
     // 3. Apply crop if defined
+    let targetCanvas = stage;
     if (transforms.crop && transforms.crop.width > 10 && transforms.crop.height > 10) {
       const finalCanvas = document.createElement('canvas');
       finalCanvas.width = Math.round(transforms.crop.width);
@@ -586,19 +604,21 @@ export function flattenAnnotations(
         finalCanvas.width,
         finalCanvas.height
       );
+      targetCanvas = finalCanvas;
+    }
 
-      resolve({
-        dataUrl: finalCanvas.toDataURL('image/png'),
-        width: finalCanvas.width,
-        height: finalCanvas.height,
-      });
-      return;
+    let dataUrl = '';
+    try {
+      dataUrl = targetCanvas.toDataURL('image/png');
+    } catch (e) {
+      console.warn('Canvas toDataURL warning:', e);
     }
 
     resolve({
-      dataUrl: stage.toDataURL('image/png'),
-      width: stage.width,
-      height: stage.height,
+      canvas: targetCanvas,
+      dataUrl,
+      width: targetCanvas.width,
+      height: targetCanvas.height,
     });
   });
 }

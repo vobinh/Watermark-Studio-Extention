@@ -277,6 +277,7 @@ export default function App({ mode }: AppProps) {
 
   // 10c. Apply annotated image from ImageAnnotationModal
   const handleApplyAnnotatedImage = (dataUrl: string, width: number, height: number) => {
+    setIsAnnotationModalOpen(false);
     const img = new Image();
     img.onload = () => {
       setImageElement(img);
@@ -289,7 +290,11 @@ export default function App({ mode }: AppProps) {
         sizeBytes: Math.round((dataUrl.length * 3) / 4),
         mimeType: 'image/png',
       });
-      saveActiveImageSession({ dataUrl, name });
+      try {
+        saveActiveImageSession({ dataUrl, name });
+      } catch (err) {
+        console.warn('Could not persist session image to storage', err);
+      }
       showToast(t('toastAnnotationApplied'));
     };
     img.src = dataUrl;
@@ -567,6 +572,8 @@ export default function App({ mode }: AppProps) {
           imageInfo={imageInfo}
           imageElement={imageElement}
           lang={lang}
+          onChangeImageFile={handleImageFile}
+          showToast={showToast}
           onApply={handleApplyAnnotatedImage}
           onClose={() => setIsAnnotationModalOpen(false)}
         />
