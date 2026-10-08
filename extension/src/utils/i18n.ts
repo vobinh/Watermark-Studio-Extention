@@ -49,7 +49,12 @@ export const translations = {
     resetOriginalBtn: 'Khôi phục ảnh gốc',
     dragToMoveHint: 'Kéo chuột để di chuyển đối tượng',
     clickToPlaceBadgeHint: 'Nhấp chuột vào ảnh để đặt số thứ tự',
-    clickToPlaceTextHint: 'Nhấp chuột vào ảnh để đặt văn bản',
+    clickToPlaceTextHint: 'Nhấp vào ảnh để mở khung nhập chữ (có thể co giãn khung)',
+    textDoneBtn: 'Xong',
+    textCancelBtn: 'Hủy',
+    textFontSizeLabel: 'Cỡ chữ:',
+    editTextBtn: 'Sửa văn bản',
+    textResizeHint: 'Kéo góc để chỉnh kích cỡ khung',
 
     // Settings Modal
     settingsTitle: 'Cài đặt Extension',
@@ -249,7 +254,12 @@ export const translations = {
     resetOriginalBtn: 'Reset to Original',
     dragToMoveHint: 'Drag to move selected object',
     clickToPlaceBadgeHint: 'Click photo to place numbered badge',
-    clickToPlaceTextHint: 'Click photo to place text note',
+    clickToPlaceTextHint: 'Click anywhere on photo to open resizable text box',
+    textDoneBtn: 'Done',
+    textCancelBtn: 'Cancel',
+    textFontSizeLabel: 'Font size:',
+    editTextBtn: 'Edit Text',
+    textResizeHint: 'Drag corner to resize text box',
 
     // Settings Modal
     settingsTitle: 'Extension Settings',

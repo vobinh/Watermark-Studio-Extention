@@ -185,6 +185,92 @@ export function drawMosaic(
 }
 
 /**
+ * Wraps text into lines fitting within maxWidth
+ */
+export function wrapTextLines(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth?: number
+): string[] {
+  if (!text) return [];
+  const paragraphs = text.split('\n');
+  if (!maxWidth || maxWidth <= 0) {
+    return paragraphs;
+  }
+
+  const lines: string[] = [];
+  for (const para of paragraphs) {
+    if (!para) {
+      lines.push('');
+      continue;
+    }
+    const words = para.split(' ');
+    let currentLine = words[0];
+
+    for (let i = 1; i < words.length; i++) {
+      const word = words[i];
+      const testLine = `${currentLine} ${word}`;
+      const metrics = ctx.measureText(testLine);
+      if (metrics.width <= maxWidth) {
+        currentLine = testLine;
+      } else {
+        lines.push(currentLine);
+        currentLine = word;
+      }
+    }
+    lines.push(currentLine);
+  }
+  return lines;
+}
+
+/**
+ * Computes bounding dimensions, lines, and layout metrics for a text annotation item
+ */
+export function getTextAnnotationDimensions(
+  ctx: CanvasRenderingContext2D,
+  item: AnnotationItem
+): {
+  width: number;
+  height: number;
+  lines: string[];
+  lineHeight: number;
+  padX: number;
+  padY: number;
+} {
+  const fontSize = item.fontSize || 22;
+  const lineHeight = Math.round(fontSize * 1.35);
+  ctx.font = `bold ${fontSize}px system-ui, -apple-system, sans-serif`;
+
+  const padX = 12;
+  const padY = 8;
+  const contentMaxWidth = item.width ? Math.max(60, item.width - padX * 2) : undefined;
+  const lines = wrapTextLines(ctx, item.text || '', contentMaxWidth);
+
+  let maxLineWidth = 0;
+  lines.forEach((line) => {
+    const w = ctx.measureText(line).width;
+    if (w > maxLineWidth) maxLineWidth = w;
+  });
+
+  const totalWidth = item.width
+    ? Math.max(item.width, maxLineWidth + padX * 2)
+    : Math.max(80, maxLineWidth + padX * 2);
+  const totalHeight = Math.max(
+    item.height || 0,
+    Math.max(1, lines.length) * lineHeight + padY * 2
+  );
+
+  return {
+    width: totalWidth,
+    height: totalHeight,
+    lines,
+    lineHeight,
+    padX,
+    padY,
+  };
+}
+
+/**
  * Renders a single annotation item
  */
 export function renderAnnotationItem(
@@ -291,38 +377,29 @@ export function renderAnnotationItem(
 
     case 'text': {
       if (!item.text) break;
-      const fontSize = item.fontSize || 22;
-      ctx.font = `bold ${fontSize}px system-ui, -apple-system, sans-serif`;
+      const dims = getTextAnnotationDimensions(ctx, item);
 
-      // Measure text width
-      const metrics = ctx.measureText(item.text);
-      const textWidth = metrics.width;
-      const textHeight = fontSize * 1.25;
-
-      const padX = 8;
-      const padY = 4;
-
-      // Draw background badge pill for contrast
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.85)'; // Dark pill background
-      drawRoundedRect(
-        ctx,
-        item.x - padX,
-        item.y - textHeight + padY,
-        textWidth + padX * 2,
-        textHeight + padY * 2,
-        6
-      );
+      // Draw rounded background badge/card for high contrast readability
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.90)';
+      drawRoundedRect(ctx, item.x, item.y, dims.width, dims.height, 8);
       ctx.fill();
 
       // Border outline around badge
       ctx.strokeStyle = item.color;
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = Math.max(1.5, item.strokeWidth * 0.5);
       ctx.stroke();
 
-      // Draw text
-      ctx.fillStyle = item.color === '#0f172a' ? '#ffffff' : item.color;
-      ctx.textBaseline = 'alphabetic';
-      ctx.fillText(item.text, item.x, item.y + padY);
+      // Draw text lines
+      ctx.fillStyle = item.color.toLowerCase() === '#0f172a' ? '#ffffff' : item.color;
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+
+      const fontSize = item.fontSize || 22;
+      ctx.font = `bold ${fontSize}px system-ui, -apple-system, sans-serif`;
+
+      dims.lines.forEach((line, idx) => {
+        ctx.fillText(line, item.x + dims.padX, item.y + dims.padY + idx * dims.lineHeight);
+      });
       break;
     }
 
@@ -406,14 +483,11 @@ export function drawSelectionBox(
     maxX = item.x + r;
     maxY = item.y + r;
   } else if (item.tool === 'text') {
-    const fontSize = item.fontSize || 22;
-    ctx.font = `bold ${fontSize}px system-ui, -apple-system, sans-serif`;
-    const textWidth = ctx.measureText(item.text || '').width;
-    const textHeight = fontSize * 1.25;
-    minX = item.x - 8;
-    minY = item.y - textHeight + 4;
-    maxX = item.x + textWidth + 8;
-    maxY = item.y + 8;
+    const dims = getTextAnnotationDimensions(ctx, item);
+    minX = item.x;
+    minY = item.y;
+    maxX = item.x + dims.width;
+    maxY = item.y + dims.height;
   }
 
   const pad = 6;

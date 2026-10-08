@@ -4,6 +4,7 @@ import {
   AnnotationItem,
   renderAnnotationItem,
   drawSelectionBox,
+  getTextAnnotationDimensions,
   flattenAnnotations,
 } from '../utils/annotationEngine';
 import { Language, ImageInfo } from '../types';
@@ -30,7 +31,20 @@ import {
   ZoomOut,
   Maximize2,
   Palette,
+  Pencil,
+  Scaling,
 } from 'lucide-react';
+
+interface ActiveTextEditor {
+  id?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  text: string;
+  fontSize: number;
+  color: string;
+}
 
 interface ImageAnnotationModalProps {
   imageInfo: ImageInfo;
@@ -68,7 +82,27 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
   const [activeColor, setActiveColor] = useState<string>('#ef4444');
   const [activeStrokeWidth, setActiveStrokeWidth] = useState<number>(4);
   const [fillShape, setFillShape] = useState<boolean>(false);
-  const [textInput, setTextInput] = useState<string>('Ghi chú quan trọng');
+  const [textInput, setTextInput] = useState<string>('Ghi chú');
+
+  // Interactive floating text note editor state
+  const [activeTextEditor, setActiveTextEditor] = useState<ActiveTextEditor | null>(null);
+  const [isResizingText, setIsResizingText] = useState<boolean>(false);
+  const textResizeStartRef = useRef<{
+    startX: number;
+    startY: number;
+    startW: number;
+    startH: number;
+  } | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Canvas corner resize for selected item
+  const [isResizingCanvasItem, setIsResizingCanvasItem] = useState<boolean>(false);
+  const [canvasResizeStart, setCanvasResizeStart] = useState<{
+    startX: number;
+    startY: number;
+    initW: number;
+    initH: number;
+  } | null>(null);
 
   // Step counter for step badges ① ② ③
   const [nextStepNumber, setNextStepNumber] = useState<number>(1);
@@ -180,9 +214,16 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
         const dist = Math.hypot(x - item.x, y - item.y);
         if (dist <= r) return item;
       } else if (item.tool === 'text') {
-        const w = (item.text?.length || 5) * (item.fontSize || 22) * 0.7;
-        const h = (item.fontSize || 22) * 1.5;
-        if (x >= item.x - pad && x <= item.x + w + pad && y >= item.y - h - pad && y <= item.y + pad) {
+        const ctx = canvasRef.current?.getContext('2d');
+        const dims = ctx
+          ? getTextAnnotationDimensions(ctx, item)
+          : { width: item.width || 120, height: item.height || 40 };
+        if (
+          x >= item.x - pad &&
+          x <= item.x + dims.width + pad &&
+          y >= item.y - pad &&
+          y <= item.y + dims.height + pad
+        ) {
           return item;
         }
       } else if (item.tool === 'pen' || item.tool === 'highlighter') {
@@ -224,8 +265,9 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
     );
     ctx.restore();
 
-    // 2. Render committed annotations
+    // 2. Render committed annotations (skip if currently being edited in floating DOM overlay)
     annotations.forEach((item) => {
+      if (activeTextEditor && activeTextEditor.id === item.id) return;
       renderAnnotationItem(ctx, item, imageElement);
     });
 
@@ -235,7 +277,7 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
     }
 
     // 4. Render active selection outline & handles
-    if (selectedId && !tempItem) {
+    if (selectedId && !tempItem && (!activeTextEditor || activeTextEditor.id !== selectedId)) {
       const selectedItem = annotations.find((a) => a.id === selectedId);
       if (selectedItem) {
         drawSelectionBox(ctx, selectedItem);
@@ -252,7 +294,116 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
     annotations,
     tempItem,
     selectedId,
+    activeTextEditor,
   ]);
+
+  // Auto-focus textarea when activeTextEditor is opened
+  useEffect(() => {
+    if (activeTextEditor && textareaRef.current) {
+      textareaRef.current.focus();
+    }
+  }, [activeTextEditor?.id, activeTextEditor?.x, activeTextEditor?.y]);
+
+  // Window mouse listener for resizing the floating text editor box
+  useEffect(() => {
+    if (!isResizingText) return;
+
+    const handleWindowMouseMove = (e: MouseEvent) => {
+      if (!textResizeStartRef.current || !activeTextEditor) return;
+      const canvas = canvasRef.current;
+      const canvasRect = canvas?.getBoundingClientRect();
+      const scaleFactor = canvasRect && canvas ? canvas.width / canvasRect.width : 1;
+
+      const dx = (e.clientX - textResizeStartRef.current.startX) * scaleFactor;
+      const dy = (e.clientY - textResizeStartRef.current.startY) * scaleFactor;
+
+      const newW = Math.max(140, Math.round(textResizeStartRef.current.startW + dx));
+      const newH = Math.max(50, Math.round(textResizeStartRef.current.startH + dy));
+
+      setActiveTextEditor((prev) => (prev ? { ...prev, width: newW, height: newH } : null));
+    };
+
+    const handleWindowMouseUp = () => {
+      setIsResizingText(false);
+      textResizeStartRef.current = null;
+    };
+
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+    };
+  }, [isResizingText, activeTextEditor]);
+
+  const handleCommitTextEditor = useCallback(() => {
+    if (!activeTextEditor) return;
+    const trimmed = activeTextEditor.text.trim();
+
+    if (!trimmed) {
+      if (activeTextEditor.id) {
+        const next = annotations.filter((a) => a.id !== activeTextEditor.id);
+        setAnnotations(next);
+        pushHistory(next);
+      }
+      setActiveTextEditor(null);
+      return;
+    }
+
+    if (activeTextEditor.id) {
+      const updated = annotations.map((item) =>
+        item.id === activeTextEditor.id
+          ? {
+              ...item,
+              text: trimmed,
+              width: activeTextEditor.width,
+              height: activeTextEditor.height,
+              fontSize: activeTextEditor.fontSize,
+              color: activeTextEditor.color,
+            }
+          : item
+      );
+      setAnnotations(updated);
+      pushHistory(updated);
+      setSelectedId(activeTextEditor.id);
+    } else {
+      const newItem: AnnotationItem = {
+        id: `text-${Date.now()}`,
+        tool: 'text',
+        x: activeTextEditor.x,
+        y: activeTextEditor.y,
+        width: activeTextEditor.width,
+        height: activeTextEditor.height,
+        text: trimmed,
+        color: activeTextEditor.color,
+        strokeWidth: activeStrokeWidth,
+        fontSize: activeTextEditor.fontSize,
+      };
+      const next = [...annotations, newItem];
+      setAnnotations(next);
+      pushHistory(next);
+      setSelectedId(newItem.id);
+    }
+
+    setActiveTextEditor(null);
+    setActiveTool('select');
+  }, [activeTextEditor, annotations, activeStrokeWidth, pushHistory]);
+
+  const handleCancelTextEditor = useCallback(() => {
+    setActiveTextEditor(null);
+  }, []);
+
+  const handleTextResizeMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsResizingText(true);
+    textResizeStartRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startW: activeTextEditor?.width || 240,
+      startH: activeTextEditor?.height || 90,
+    };
+  };
 
   useEffect(() => {
     redraw();
@@ -287,13 +438,40 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const pt = getStageCoordinates(e);
 
+    // If text editor is open and clicked canvas, commit it first
+    if (activeTextEditor) {
+      handleCommitTextEditor();
+      return;
+    }
+
     // If Select tool: check hit
     if (activeTool === 'select') {
       const hit = findItemAt(pt.x, pt.y);
       if (hit) {
         setSelectedId(hit.id);
-        setIsDragging(true);
-        setDragStartPoint(pt);
+
+        // Check if clicking near the bottom-right corner of the item's bounding box
+        const ctx = canvasRef.current?.getContext('2d');
+        const dims =
+          hit.tool === 'text' && ctx
+            ? getTextAnnotationDimensions(ctx, hit)
+            : { width: hit.width || 100, height: hit.height || 60 };
+
+        const cornerX = hit.x + dims.width;
+        const cornerY = hit.y + dims.height;
+
+        if (Math.hypot(pt.x - cornerX, pt.y - cornerY) <= 22) {
+          setIsResizingCanvasItem(true);
+          setCanvasResizeStart({
+            startX: pt.x,
+            startY: pt.y,
+            initW: dims.width,
+            initH: dims.height,
+          });
+        } else {
+          setIsDragging(true);
+          setDragStartPoint(pt);
+        }
       } else {
         setSelectedId(null);
       }
@@ -318,21 +496,17 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
       return;
     }
 
-    // If Text Note tool: Click to place text annotation!
+    // If Text Note tool: Click to open interactive resizable text box!
     if (activeTool === 'text') {
-      const newText: AnnotationItem = {
-        id: `text-${Date.now()}`,
-        tool: 'text',
+      setActiveTextEditor({
         x: pt.x,
         y: pt.y,
-        text: textInput.trim() || 'Ghi chú',
-        color: activeColor,
-        strokeWidth: activeStrokeWidth,
+        width: 240,
+        height: 90,
+        text: '',
         fontSize: Math.max(18, activeStrokeWidth * 5),
-      };
-      pushHistory([...annotations, newText]);
-      setSelectedId(newText.id);
-      setActiveTool('select');
+        color: activeColor,
+      });
       return;
     }
 
@@ -358,8 +532,43 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
     setTempItem(initialItem);
   };
 
+  const handleCanvasDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const pt = getStageCoordinates(e);
+    const hit = findItemAt(pt.x, pt.y);
+    if (hit && hit.tool === 'text') {
+      setActiveTextEditor({
+        id: hit.id,
+        x: hit.x,
+        y: hit.y,
+        width: hit.width || 240,
+        height: hit.height || 90,
+        text: hit.text || '',
+        fontSize: hit.fontSize || 22,
+        color: hit.color || activeColor,
+      });
+    }
+  };
+
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const pt = getStageCoordinates(e);
+
+    // Resizing canvas item from corner handle
+    if (isResizingCanvasItem && selectedId && canvasResizeStart) {
+      const dx = pt.x - canvasResizeStart.startX;
+      const dy = pt.y - canvasResizeStart.startY;
+
+      setAnnotations((prev) =>
+        prev.map((item) => {
+          if (item.id !== selectedId) return item;
+          return {
+            ...item,
+            width: Math.max(80, Math.round(canvasResizeStart.initW + dx)),
+            height: Math.max(40, Math.round(canvasResizeStart.initH + dy)),
+          };
+        })
+      );
+      return;
+    }
 
     // Dragging selected item
     if (isDragging && selectedId && dragStartPoint) {
@@ -418,6 +627,13 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
   };
 
   const handleMouseUp = () => {
+    if (isResizingCanvasItem) {
+      setIsResizingCanvasItem(false);
+      setCanvasResizeStart(null);
+      setUndoStack((prev) => [...prev, annotations]);
+      return;
+    }
+
     if (isDragging) {
       setIsDragging(false);
       setDragStartPoint(null);
@@ -513,6 +729,32 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
               title={t('deleteSelectedBtn')}
             >
               <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {selectedId && annotations.find((a) => a.id === selectedId)?.tool === 'text' && (
+            <button
+              type="button"
+              onClick={() => {
+                const target = annotations.find((a) => a.id === selectedId);
+                if (target) {
+                  setActiveTextEditor({
+                    id: target.id,
+                    x: target.x,
+                    y: target.y,
+                    width: target.width || 240,
+                    height: target.height || 90,
+                    text: target.text || '',
+                    fontSize: target.fontSize || 22,
+                    color: target.color || activeColor,
+                  });
+                }
+              }}
+              className="px-2 py-1 rounded-lg border border-blue-500/50 bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 text-xs font-semibold flex items-center gap-1 transition-colors"
+              title={t('editTextBtn')}
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              <span>{t('editTextBtn')}</span>
             </button>
           )}
 
@@ -659,7 +901,17 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
                 <button
                   key={c.value}
                   type="button"
-                  onClick={() => setActiveColor(c.value)}
+                  onClick={() => {
+                    setActiveColor(c.value);
+                    if (activeTextEditor) {
+                      setActiveTextEditor((prev) => (prev ? { ...prev, color: c.value } : null));
+                    }
+                    if (selectedId) {
+                      setAnnotations((prev) =>
+                        prev.map((a) => (a.id === selectedId ? { ...a, color: c.value } : a))
+                      );
+                    }
+                  }}
                   className={`w-5 h-5 rounded-full transition-transform border border-slate-700/80 ${
                     activeColor.toLowerCase() === c.value.toLowerCase()
                       ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-slate-900 scale-110'
@@ -676,7 +928,17 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
                 <input
                   type="color"
                   value={activeColor}
-                  onChange={(e) => setActiveColor(e.target.value)}
+                  onChange={(e) => {
+                    setActiveColor(e.target.value);
+                    if (activeTextEditor) {
+                      setActiveTextEditor((prev) => (prev ? { ...prev, color: e.target.value } : null));
+                    }
+                    if (selectedId) {
+                      setAnnotations((prev) =>
+                        prev.map((a) => (a.id === selectedId ? { ...a, color: e.target.value } : a))
+                      );
+                    }
+                  }}
                   className="opacity-0 absolute inset-0 cursor-pointer w-full h-full"
                 />
                 <Palette className="w-2.5 h-2.5 text-slate-400" />
@@ -725,16 +987,11 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
             </label>
           )}
 
-          {/* Text note input (when text tool active) */}
+          {/* Text note active hint */}
           {activeTool === 'text' && (
-            <div className="flex items-center gap-1.5 border-l border-slate-800 pl-2">
-              <input
-                type="text"
-                value={textInput}
-                onChange={(e) => setTextInput(e.target.value)}
-                placeholder={t('annotateTextPlaceholder')}
-                className="px-2 py-0.5 text-xs bg-slate-800 border border-slate-700 rounded-lg text-white w-44 focus:outline-none focus:border-blue-500"
-              />
+            <div className="flex items-center gap-1.5 border-l border-slate-800 pl-2 text-blue-400 font-semibold text-xs">
+              <Type className="w-3.5 h-3.5" />
+              <span>{t('clickToPlaceTextHint')}</span>
             </div>
           )}
         </div>
@@ -764,6 +1021,7 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
+            onDoubleClick={handleCanvasDoubleClick}
             className={`block max-w-full max-h-[75vh] object-contain touch-none ${
               activeTool === 'select'
                 ? 'cursor-default'
@@ -772,6 +1030,125 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
                 : 'cursor-crosshair'
             }`}
           />
+
+          {/* Interactive Floating Resizable Text Box */}
+          {activeTextEditor && (
+            <div
+              className="absolute z-30 flex flex-col rounded-xl border-2 shadow-2xl backdrop-blur-md select-none group"
+              style={{
+                left: `${(activeTextEditor.x / stageWidth) * 100}%`,
+                top: `${(activeTextEditor.y / stageHeight) * 100}%`,
+                width: `${(activeTextEditor.width / stageWidth) * 100}%`,
+                minWidth: '180px',
+                borderColor: activeTextEditor.color,
+                backgroundColor: 'rgba(15, 23, 42, 0.94)',
+                boxShadow: `0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 0 15px ${activeTextEditor.color}33`,
+              }}
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              {/* Mini Header: Font Size Controls + Done/Cancel */}
+              <div className="flex items-center justify-between gap-1 px-2.5 py-1.5 bg-slate-900/95 border-b border-slate-800 rounded-t-xl select-none">
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-slate-400 font-semibold">
+                    {t('textFontSizeLabel')}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setActiveTextEditor((prev) =>
+                        prev ? { ...prev, fontSize: Math.max(12, prev.fontSize - 3) } : null
+                      )
+                    }
+                    className="w-5 h-5 flex items-center justify-center rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition-colors"
+                    title="Giảm cỡ chữ"
+                  >
+                    -
+                  </button>
+                  <span className="text-[11px] font-mono font-bold text-blue-400 min-w-[28px] text-center">
+                    {activeTextEditor.fontSize}px
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setActiveTextEditor((prev) =>
+                        prev ? { ...prev, fontSize: Math.min(64, prev.fontSize + 3) } : null
+                      )
+                    }
+                    className="w-5 h-5 flex items-center justify-center rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition-colors"
+                    title="Tăng cỡ chữ"
+                  >
+                    +
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={handleCancelTextEditor}
+                    className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
+                    title={t('textCancelBtn')}
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCommitTextEditor}
+                    className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1 shadow-md shadow-blue-600/30 transition-all"
+                    title={t('textDoneBtn')}
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>{t('textDoneBtn')}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Textarea Input */}
+              <div className="p-2 flex-1">
+                <textarea
+                  ref={textareaRef}
+                  autoFocus
+                  value={activeTextEditor.text}
+                  onChange={(e) =>
+                    setActiveTextEditor((prev) =>
+                      prev ? { ...prev, text: e.target.value } : null
+                    )
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      handleCommitTextEditor();
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault();
+                      handleCancelTextEditor();
+                    }
+                  }}
+                  placeholder={t('annotateTextPlaceholder')}
+                  rows={2}
+                  className="w-full bg-transparent text-white placeholder-slate-500 resize-none outline-none font-sans font-bold leading-normal min-h-[48px]"
+                  style={{
+                    color:
+                      activeTextEditor.color.toLowerCase() === '#0f172a'
+                        ? '#ffffff'
+                        : activeTextEditor.color,
+                    fontSize: `${activeTextEditor.fontSize}px`,
+                  }}
+                />
+              </div>
+
+              {/* Bottom Resizing Handle Bar */}
+              <div className="flex items-center justify-between px-2.5 py-1 text-[10px] text-slate-400 bg-slate-950/70 rounded-b-xl border-t border-slate-800/80">
+                <span className="truncate">{t('textResizeHint')}</span>
+                <div
+                  onMouseDown={handleTextResizeMouseDown}
+                  className="cursor-nwse-resize p-1 text-slate-400 hover:text-blue-400 transition-colors"
+                  title="Kéo góc này để thay đổi kích thước khung"
+                >
+                  <Scaling className="w-3.5 h-3.5" />
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </main>
     </div>
