@@ -61,7 +61,7 @@ interface ImageAnnotationModalProps {
   imageInfo: ImageInfo;
   imageElement: HTMLImageElement;
   lang: Language;
-  onApply: (dataUrl: string, width: number, height: number) => void;
+  onApply: (dataUrl: string, width: number, height: number, newImg?: HTMLImageElement) => void;
   onClose: () => void;
   onChangeImageFile?: (file: File) => void;
   showToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -725,11 +725,39 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
     }
   };
 
+  // Helper to get all annotations including any text note currently being typed
+  const getCommittedAnnotations = useCallback((): AnnotationItem[] => {
+    let current = [...annotations];
+    if (activeTextEditor && activeTextEditor.text.trim()) {
+      const textItem: AnnotationItem = {
+        id: activeTextEditor.id || `text-${Date.now()}`,
+        tool: 'text',
+        x: activeTextEditor.x,
+        y: activeTextEditor.y,
+        width: activeTextEditor.width,
+        height: activeTextEditor.height,
+        text: activeTextEditor.text.trim(),
+        color: activeTextEditor.color,
+        strokeWidth: activeStrokeWidth,
+        fontSize: activeTextEditor.fontSize,
+        hasBorder: activeTextEditor.hasBorder,
+      };
+      const idx = current.findIndex((a) => a.id === textItem.id);
+      if (idx >= 0) {
+        current[idx] = textItem;
+      } else {
+        current.push(textItem);
+      }
+    }
+    return current;
+  }, [annotations, activeTextEditor, activeStrokeWidth]);
+
   // Save/Download annotated image directly
   const handleSaveImage = async (format: 'png' | 'jpeg' = 'png') => {
     setIsApplying(true);
     try {
-      const result = await flattenAnnotations(imageElement, annotations, {
+      const finalAnnotations = getCommittedAnnotations();
+      const result = await flattenAnnotations(imageElement, finalAnnotations, {
         rotation,
         flipH,
         flipV,
@@ -740,6 +768,7 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
       notifyUser(t('toastDownloadAnnotatedSuccess'), 'success');
     } catch (err: any) {
       console.error('Lỗi khi tải ảnh:', err);
+      notifyUser('Lỗi khi tải ảnh: ' + (err?.message || err), 'error');
     } finally {
       setIsApplying(false);
     }
@@ -749,7 +778,8 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
   const handleCopyImage = async () => {
     setIsApplying(true);
     try {
-      const result = await flattenAnnotations(imageElement, annotations, {
+      const finalAnnotations = getCommittedAnnotations();
+      const result = await flattenAnnotations(imageElement, finalAnnotations, {
         rotation,
         flipH,
         flipV,
@@ -764,6 +794,7 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
       }
     } catch (err: any) {
       console.error('Lỗi khi sao chép ảnh:', err);
+      notifyUser('Lỗi khi sao chép ảnh: ' + (err?.message || err), 'error');
     } finally {
       setIsApplying(false);
     }
@@ -792,15 +823,53 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
   const handleApplyToWatermark = async () => {
     setIsApplying(true);
     try {
-      const result = await flattenAnnotations(imageElement, annotations, {
+      // 1. Commit active text editor if open
+      const finalAnnotations = getCommittedAnnotations();
+
+      // 2. Flatten annotations onto stage
+      const result = await flattenAnnotations(imageElement, finalAnnotations, {
         rotation,
         flipH,
         flipV,
       });
-      onApply(result.dataUrl, result.width, result.height);
+
+      // 3. Create blob URL for fast, zero-copy image transfer
+      let blobUrl = '';
+      try {
+        const blob = await new Promise<Blob | null>((resolve) => {
+          result.canvas.toBlob((b) => resolve(b), 'image/png');
+        });
+        if (blob) {
+          blobUrl = URL.createObjectURL(blob);
+        }
+      } catch (blobErr) {
+        console.warn('toBlob fallback:', blobErr);
+      }
+
+      const imgSource = blobUrl || result.dataUrl || result.canvas.toDataURL('image/png');
+
+      // 4. Preload and verify image object is fully ready before transferring
+      const newImg = new Image();
+      newImg.crossOrigin = 'anonymous';
+
+      await new Promise<void>((resolve, reject) => {
+        newImg.onload = () => resolve();
+        newImg.onerror = () => {
+          if (result.dataUrl && newImg.src !== result.dataUrl) {
+            newImg.src = result.dataUrl;
+          } else {
+            reject(new Error('Không thể tải dữ liệu ảnh đã vẽ chú thích'));
+          }
+        };
+        newImg.src = imgSource;
+      });
+
+      // 5. Transfer to main Watermark screen
+      onApply(result.dataUrl || imgSource, result.width, result.height, newImg);
       onClose();
     } catch (err: any) {
-      console.error('Lỗi khi áp dụng:', err);
+      console.error('Lỗi khi chuyển sang Watermark:', err);
+      notifyUser('Lỗi khi chuyển sang Watermark: ' + (err?.message || err), 'error');
     } finally {
       setIsApplying(false);
     }
@@ -998,11 +1067,11 @@ export const ImageAnnotationModal: React.FC<ImageAnnotationModalProps> = ({
             type="button"
             onClick={handleApplyToWatermark}
             disabled={isApplying}
-            className="px-3 sm:px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold shadow-md shadow-indigo-600/30 transition-all flex items-center gap-1.5"
+            className="px-3 sm:px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-60 text-white text-xs font-bold shadow-md shadow-indigo-600/30 transition-all flex items-center gap-1.5 shrink-0"
             title={t('applyToWatermarkBtn')}
           >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">{t('applyToWatermarkBtn')}</span>
+            <Sparkles className={`w-3.5 h-3.5 ${isApplying ? 'animate-spin' : ''}`} />
+            <span>{isApplying ? 'Đang chuyển...' : t('applyToWatermarkBtn')}</span>
           </button>
 
           <button

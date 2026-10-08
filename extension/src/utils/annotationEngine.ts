@@ -610,8 +610,12 @@ export function flattenAnnotations(
     let dataUrl = '';
     try {
       dataUrl = targetCanvas.toDataURL('image/png');
-    } catch (e) {
-      console.warn('Canvas toDataURL warning:', e);
+    } catch {
+      try {
+        dataUrl = targetCanvas.toDataURL('image/jpeg', 0.95);
+      } catch (e) {
+        console.warn('Canvas toDataURL warning:', e);
+      }
     }
 
     resolve({

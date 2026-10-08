@@ -276,28 +276,47 @@ export default function App({ mode }: AppProps) {
   };
 
   // 10c. Apply annotated image from ImageAnnotationModal
-  const handleApplyAnnotatedImage = (dataUrl: string, width: number, height: number) => {
+  const handleApplyAnnotatedImage = (
+    dataUrl: string,
+    width: number,
+    height: number,
+    newImageElement?: HTMLImageElement
+  ) => {
     setIsAnnotationModalOpen(false);
-    const img = new Image();
-    img.onload = () => {
+    const baseOriginalName = imageInfo?.name ? imageInfo.name.replace(/\.[^/.]+$/, '') : 'photo';
+    const name = `${baseOriginalName}_annotated.png`;
+
+    const applyReadyImage = (img: HTMLImageElement, url: string) => {
       setImageElement(img);
-      const name = imageInfo?.name || 'annotated_image.png';
       setImageInfo({
-        dataUrl,
+        dataUrl: url,
         name,
-        width,
-        height,
-        sizeBytes: Math.round((dataUrl.length * 3) / 4),
+        width: img.naturalWidth || width,
+        height: img.naturalHeight || height,
+        sizeBytes: Math.round((url.length * 3) / 4) || 2048,
         mimeType: 'image/png',
       });
-      try {
-        saveActiveImageSession({ dataUrl, name });
-      } catch (err) {
-        console.warn('Could not persist session image to storage', err);
+      if (url.startsWith('data:')) {
+        try {
+          saveActiveImageSession({ dataUrl: url, name });
+        } catch (err) {
+          console.warn('Could not persist session image to storage', err);
+        }
       }
       showToast(t('toastAnnotationApplied'));
     };
-    img.src = dataUrl;
+
+    if (newImageElement && newImageElement.complete && (newImageElement.naturalWidth > 0 || newImageElement.width > 0)) {
+      applyReadyImage(newImageElement, dataUrl || newImageElement.src);
+    } else {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => applyReadyImage(img, dataUrl);
+      img.onerror = () => {
+        showToast('Lỗi khi chuyển ảnh sang màn hình Watermark', 'error');
+      };
+      img.src = dataUrl;
+    }
   };
 
   // 11. Custom position change
